@@ -1,25 +1,14 @@
+
 <?php
 
 require_once __DIR__ . '/config.php';
 
 /**
- * CVE Matcher
- *
- * Pipeline:
- * Product + Version
- *       ↓
- * NVD API 2.0
- *       ↓
- * CPE structured data
- *       ↓
- * Version validation
- *       ↓
- * CVE results
+ * CVE Matcher - Attack Surface Watch
  *
  * Compatible with scan_orchestrator.php
  *
- * find_vulnerabilities() returns:
- *
+ * Return structure:
  * [
  *     'status'  => 'ok' | 'no_version' | 'no_match' | 'error',
  *     'results' => [...]
@@ -27,60 +16,186 @@ require_once __DIR__ . '/config.php';
  */
 
 
-/**
- * Mini-dictionnaire CPE pour les produits les plus courants détectés par
- * le scanner (nmap fingerprinting + tech_detector.php). Permet d'utiliser
- * virtualMatchString (matching exact côté serveur NVD) au lieu de
- * keywordSearch (texte libre, peu fiable) quand le produit est reconnu.
- *
- * Clé = normalize_product_name() du produit détecté
- * Valeur = ['vendor' => ..., 'product' => ...] tels qu'utilisés dans les
- * CPE officiels NVD (cpe:2.3:a:VENDOR:PRODUCT:VERSION:...)
- */
+/* =========================================================
+   1. KNOWN CPE PRODUCTS
+========================================================= */
+
 function get_known_cpe_map(): array
 {
     return [
-        'http server'  => ['vendor' => 'apache', 'product' => 'http_server'],
-        'nginx'        => ['vendor' => 'nginx', 'product' => 'nginx'],
-        'mysql'        => ['vendor' => 'mysql', 'product' => 'mysql'],
-        'mariadb'      => ['vendor' => 'mariadb', 'product' => 'mariadb'],
-        'php'          => ['vendor' => 'php', 'product' => 'php'],
-        'openssh'      => ['vendor' => 'openbsd', 'product' => 'openssh'],
-        'wordpress'    => ['vendor' => 'wordpress', 'product' => 'wordpress'],
-        'nodejs'       => ['vendor' => 'nodejs', 'product' => 'node.js'],
-        'express'      => ['vendor' => 'expressjs', 'product' => 'express'],
-        'postgresql'   => ['vendor' => 'postgresql', 'product' => 'postgresql'],
-        'mongodb'      => ['vendor' => 'mongodb', 'product' => 'mongodb'],
-        'redis'        => ['vendor' => 'redis', 'product' => 'redis'],
-        'tomcat'       => ['vendor' => 'apache', 'product' => 'tomcat'],
-        'jquery'       => ['vendor' => 'jquery', 'product' => 'jquery'],
-        'drupal'       => ['vendor' => 'drupal', 'product' => 'drupal'],
-        'joomla'       => ['vendor' => 'joomla', 'product' => 'joomla'],
-        'proftpd'      => ['vendor' => 'proftpd', 'product' => 'proftpd'],
-        'vsftpd'       => ['vendor' => 'vsftpd', 'product' => 'vsftpd'],
-        'samba'        => ['vendor' => 'samba', 'product' => 'samba'],
+        'http server' => [
+            'vendor' => 'apache',
+            'product' => 'http_server'
+        ],
+        'nginx' => [
+            'vendor' => 'nginx',
+            'product' => 'nginx'
+        ],
+        'mysql' => [
+            'vendor' => 'mysql',
+            'product' => 'mysql'
+        ],
+        'mariadb' => [
+            'vendor' => 'mariadb',
+            'product' => 'mariadb'
+        ],
+        'php' => [
+            'vendor' => 'php',
+            'product' => 'php'
+        ],
+        'openssh' => [
+            'vendor' => 'openbsd',
+            'product' => 'openssh'
+        ],
+        'wordpress' => [
+            'vendor' => 'wordpress',
+            'product' => 'wordpress'
+        ],
+        'nodejs' => [
+            'vendor' => 'nodejs',
+            'product' => 'node.js'
+        ],
+        'express' => [
+            'vendor' => 'expressjs',
+            'product' => 'express'
+        ],
+        'postgresql' => [
+            'vendor' => 'postgresql',
+            'product' => 'postgresql'
+        ],
+        'mongodb' => [
+            'vendor' => 'mongodb',
+            'product' => 'mongodb'
+        ],
+        'redis' => [
+            'vendor' => 'redis',
+            'product' => 'redis'
+        ],
+        'tomcat' => [
+            'vendor' => 'apache',
+            'product' => 'tomcat'
+        ],
+        'jquery' => [
+            'vendor' => 'jquery',
+            'product' => 'jquery'
+        ],
+        'drupal' => [
+            'vendor' => 'drupal',
+            'product' => 'drupal'
+        ],
+        'joomla' => [
+            'vendor' => 'joomla',
+            'product' => 'joomla'
+        ],
+        'proftpd' => [
+            'vendor' => 'proftpd',
+            'product' => 'proftpd'
+        ],
+        'vsftpd' => [
+            'vendor' => 'vsftpd',
+            'product' => 'vsftpd'
+        ],
+        'samba' => [
+            'vendor' => 'samba',
+            'product' => 'samba'
+        ],
     ];
 }
 
-/**
- * Cherche le CPE officiel connu pour un produit détecté. Retourne null si
- * inconnu (dans ce cas find_vulnerabilities() retombe sur keywordSearch).
- */
+
 function lookup_known_cpe(string $product): ?array
 {
-    $normalized = normalize_product_name($product);
     $map = get_known_cpe_map();
-    return $map[$normalized] ?? null;
+
+    return $map[normalize_product_name($product)] ?? null;
+}
+
+
+/* =========================================================
+   2. PRODUCT NORMALIZATION
+========================================================= */
+
+function normalize_product_name(string $product): string
+{
+    $product = strtolower(trim($product));
+
+    $product = str_replace(
+        ['\\', '_', '-', '.'],
+        ' ',
+        $product
+    );
+
+    $product = preg_replace('/\s+/', ' ', $product);
+
+    $aliases = [
+        'apache httpd' => 'http server',
+        'apache http server' => 'http server',
+        'apache2' => 'http server',
+        'httpd' => 'http server',
+
+        'node js' => 'nodejs',
+        'node.js' => 'nodejs',
+
+        'mariadb server' => 'mariadb',
+        'mysql server' => 'mysql',
+
+        'postgres' => 'postgresql',
+    ];
+
+    return trim($aliases[$product] ?? $product);
 }
 
 
 /**
- * Recherche les vulnérabilités NVD correspondant à un produit/version.
+ * Product-specific version normalization.
+ *
+ * Add a rule only when the product's version format
+ * is known and verified.
  */
-function find_vulnerabilities(string $product, ?string $version): array
-{
+function normalize_detected_version(
+    string $product,
+    string $version
+): string {
+
+    $product = normalize_product_name($product);
+    $version = trim($version);
+
+    $versionRules = [
+        'mariadb' => [
+            'pattern' => '/^5\.5\.5-(\d+(?:\.\d+)+)(?:[-+].*)?$/i',
+            'replacement' => '$1',
+        ],
+    ];
+
+    if (isset($versionRules[$product])) {
+
+        $rule = $versionRules[$product];
+
+        $normalized = preg_replace(
+            $rule['pattern'],
+            $rule['replacement'],
+            $version
+        );
+
+        if ($normalized !== null) {
+            $version = $normalized;
+        }
+    }
+
+    return normalize_version($version);
+}
+
+
+/* =========================================================
+   3. MAIN CVE SEARCH
+========================================================= */
+
+function find_vulnerabilities(
+    string $product,
+    ?string $version
+): array {
+
     $product = trim($product);
-    $version = $version !== null ? trim($version) : null;
 
     if ($product === '') {
         return [
@@ -89,37 +204,42 @@ function find_vulnerabilities(string $product, ?string $version): array
         ];
     }
 
-    if ($version === null || $version === '' || $version === 'unknown') {
+    if (
+        $version === null ||
+        trim($version) === '' ||
+        strtolower(trim($version)) === 'unknown'
+    ) {
         return [
             'status' => 'no_version',
             'results' => []
         ];
     }
 
-    /*
-     * IMPORTANT :
-     * NVD keywordSearch (recherche texte libre) est peu fiable : elle exige
-     * que TOUS les mots apparaissent littéralement dans la description du
-     * CVE. "Apache httpd 2.4.58" échoue souvent car NVD écrit "Apache HTTP
-     * Server" dans ses descriptions, pas "httpd" — résultat : 0 CVE trouvée
-     * alors que le produit/version est réellement vulnérable.
-     *
-     * Solution : quand on connaît le CPE officiel (vendor:product) du
-     * produit détecté, on utilise virtualMatchString — NVD fait alors le
-     * matching CPE + plage de versions côté serveur, de façon exacte et
-     * fiable. On ne retombe sur keywordSearch qu'en dernier recours pour
-     * les produits qu'on ne reconnaît pas.
-     */
+    $version = normalize_detected_version(
+        $product,
+        $version
+    );
+
     $cpeInfo = lookup_known_cpe($product);
-    $keyword = $product . ' ' . $version; // utilisé pour les logs d'erreur quelle que soit la stratégie
+
+    $keyword = $product . ' ' . $version;
 
     if ($cpeInfo !== null) {
-        $virtualMatchString = "cpe:2.3:a:{$cpeInfo['vendor']}:{$cpeInfo['product']}:{$version}:*:*:*:*:*:*:*";
+
+        $virtualMatchString =
+            "cpe:2.3:a:" .
+            $cpeInfo['vendor'] . ":" .
+            $cpeInfo['product'] . ":" .
+            $version .
+            ":*:*:*:*:*:*:*";
+
         $query = http_build_query([
             'virtualMatchString' => $virtualMatchString,
             'resultsPerPage' => 50
         ]);
+
     } else {
+
         $query = http_build_query([
             'keywordSearch' => $keyword,
             'resultsPerPage' => 50
@@ -132,7 +252,10 @@ function find_vulnerabilities(string $product, ?string $version): array
         'User-Agent: AttackSurfaceWatch/1.0'
     ];
 
-    if (defined('NVD_API_KEY') && NVD_API_KEY !== '') {
+    if (
+        defined('NVD_API_KEY') &&
+        NVD_API_KEY !== ''
+    ) {
         $headers[] = 'apiKey: ' . NVD_API_KEY;
     }
 
@@ -150,13 +273,21 @@ function find_vulnerabilities(string $product, ?string $version): array
 
     $raw = curl_exec($ch);
 
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $httpCode = curl_getinfo(
+        $ch,
+        CURLINFO_HTTP_CODE
+    );
+
     $curlError = curl_error($ch);
 
     curl_close($ch);
 
     if ($raw === false) {
-        error_log("[cve_matcher] NVD request failed for '{$keyword}': {$curlError}");
+
+        error_log(
+            "[cve_matcher] NVD request failed for '{$keyword}': {$curlError}"
+        );
+
         return [
             'status' => 'error',
             'results' => []
@@ -164,7 +295,11 @@ function find_vulnerabilities(string $product, ?string $version): array
     }
 
     if ($httpCode < 200 || $httpCode >= 300) {
-        error_log("[cve_matcher] NVD HTTP {$httpCode} for '{$keyword}'");
+
+        error_log(
+            "[cve_matcher] NVD HTTP {$httpCode} for '{$keyword}'"
+        );
+
         return [
             'status' => 'error',
             'results' => []
@@ -174,7 +309,11 @@ function find_vulnerabilities(string $product, ?string $version): array
     $data = json_decode($raw, true);
 
     if (!is_array($data)) {
-        error_log("[cve_matcher] Invalid JSON returned by NVD for '{$keyword}'");
+
+        error_log(
+            "[cve_matcher] Invalid JSON returned by NVD"
+        );
+
         return [
             'status' => 'error',
             'results' => []
@@ -195,29 +334,43 @@ function find_vulnerabilities(string $product, ?string $version): array
 
     foreach ($data['vulnerabilities'] as $item) {
 
-        if (!isset($item['cve']) || !is_array($item['cve'])) {
+        if (
+            !isset($item['cve']) ||
+            !is_array($item['cve'])
+        ) {
             continue;
         }
 
         $cve = $item['cve'];
+
         $cveId = $cve['id'] ?? null;
 
         if (!$cveId) {
             continue;
         }
 
-        $match = cve_matches_product_and_version($cve, $product, $version);
+        $match = cve_matches_product_and_version(
+            $cve,
+            $product,
+            $version
+        );
 
         if (!$match['matched']) {
             continue;
         }
 
         $score = extract_cvss_score($cve);
+
         $description = extract_cve_description($cve);
 
         $publishedAt = null;
+
         if (!empty($cve['published'])) {
-            $publishedAt = substr($cve['published'], 0, 10);
+            $publishedAt = substr(
+                $cve['published'],
+                0,
+                10
+            );
         }
 
         $results[] = [
@@ -226,7 +379,10 @@ function find_vulnerabilities(string $product, ?string $version): array
             'severity' => score_to_severity($score),
             'description' => $description,
             'published_at' => $publishedAt,
-            'confidence' => 'high',
+
+            // A version match is not proof of exploitability.
+            'confidence' => 'medium',
+
             'match_reason' => $match['reason'],
         ];
     }
@@ -238,7 +394,9 @@ function find_vulnerabilities(string $product, ?string $version): array
         ];
     }
 
+    // Remove duplicate CVE IDs.
     $unique = [];
+
     foreach ($results as $result) {
         $unique[$result['cve_id']] = $result;
     }
@@ -250,62 +408,10 @@ function find_vulnerabilities(string $product, ?string $version): array
 }
 
 
-/**
- * Vérifie le produit ET la version dans les CPE structurés NVD.
- * Exemple CPE: cpe:2.3:a:apache:http_server:2.4.58:*:*:*:*:*:*:*
- */
-function cve_matches_product_and_version(array $cve, string $product, string $detectedVersion): array
-{
-    $configurations = $cve['configurations'] ?? [];
+/* =========================================================
+   4. CPE PARSING
+========================================================= */
 
-    if (!is_array($configurations)) {
-        return ['matched' => false, 'reason' => ''];
-    }
-
-    $productNormalized = normalize_product_name($product);
-
-    foreach ($configurations as $configuration) {
-        foreach ($configuration['nodes'] ?? [] as $node) {
-            foreach ($node['cpeMatch'] ?? [] as $cpeMatch) {
-
-                $criteria = $cpeMatch['criteria'] ?? '';
-                if ($criteria === '') {
-                    continue;
-                }
-
-                $cpeData = parse_cpe_23($criteria);
-                if ($cpeData === null) {
-                    continue;
-                }
-
-                $cpeProduct = normalize_product_name($cpeData['product']);
-                $cpeVersion = $cpeData['version'];
-
-                if (!products_match($productNormalized, $cpeProduct)) {
-                    continue;
-                }
-
-                $versionMatch = version_matches_cpe($detectedVersion, $cpeVersion, $cpeMatch);
-                if (!$versionMatch) {
-                    continue;
-                }
-
-                return [
-                    'matched' => true,
-                    'reason' => "CPE NVD confirme {$product} {$detectedVersion}"
-                ];
-            }
-        }
-    }
-
-    return ['matched' => false, 'reason' => ''];
-}
-
-
-/**
- * Parse un CPE 2.3.
- * Exemple: cpe:2.3:a:apache:http_server:2.4.58:*:*:*:*:*:*:*
- */
 function parse_cpe_23(string $cpe): ?array
 {
     if (!str_starts_with($cpe, 'cpe:2.3:')) {
@@ -327,164 +433,77 @@ function parse_cpe_23(string $cpe): ?array
 }
 
 
-/**
- * Normalisation des noms de produits.
- */
-function normalize_product_name(string $product): string
-{
-    $product = strtolower(trim($product));
+/* =========================================================
+   5. PRODUCT / CPE IDENTITY
+========================================================= */
 
-    $product = str_replace(['\\', '_', '-', '.'], ' ', $product);
-
-    $aliases = [
-        'apache httpd' => 'http server',
-        'apache http server' => 'http server',
-        'apache2' => 'http server',
-        'node js' => 'nodejs',
-        'node.js' => 'nodejs',
-        'mariadb server' => 'mariadb',
-        'mysql server' => 'mysql',
-    ];
-
-    foreach ($aliases as $from => $to) {
-        if ($product === $from) {
-            $product = $to;
-        }
-    }
-
-    $product = preg_replace('/\s+/', ' ', $product);
-
-    return trim($product);
-}
-
-
-/**
- * Compare deux noms de produits.
- */
-function products_match(string $detectedProduct, string $cpeProduct): bool
-{
-    if ($detectedProduct === '' || $cpeProduct === '') {
-        return false;
-    }
-
-    if ($detectedProduct === $cpeProduct) {
-        return true;
-    }
-
-    $detectedTokens = preg_split('/\s+/', $detectedProduct);
-    $cpeTokens = preg_split('/\s+/', $cpeProduct);
-
-    $detectedTokens = array_filter($detectedTokens, fn($token) => strlen($token) >= 3);
-    $cpeTokens = array_filter($cpeTokens, fn($token) => strlen($token) >= 3);
-
-    if (empty($detectedTokens) || empty($cpeTokens)) {
-        return false;
-    }
-
-    $matches = 0;
-
-    foreach ($cpeTokens as $token) {
-        foreach ($detectedTokens as $detectedToken) {
-            if (
-                $token === $detectedToken ||
-                str_contains($detectedToken, $token) ||
-                str_contains($token, $detectedToken)
-            ) {
-                $matches++;
-                break;
-            }
-        }
-    }
-
-    return $matches === count($cpeTokens);
-}
-
-
-/**
- * Vérifie si la version détectée correspond à la version affectée par le CPE.
- */
-function version_matches_cpe(string $detectedVersion, string $cpeVersion, array $cpeMatch): bool
-{
-    $detectedVersion = trim($detectedVersion);
-    $cpeVersion = trim($cpeVersion);
-
-    if ($detectedVersion === '') {
-        return false;
-    }
-
-    if ($cpeVersion === '*' || $cpeVersion === '-') {
-        return version_is_in_range($detectedVersion, $cpeMatch);
-    }
-
-    if (normalize_version($detectedVersion) === normalize_version($cpeVersion)) {
-        return true;
-    }
-
-    if (version_compare_safe($detectedVersion, $cpeVersion) === 0) {
-        return true;
-    }
-
-    return false;
-}
-
-
-/**
- * Vérifie une plage de versions CPE.
- * NVD peut fournir: versionStartIncluding / versionStartExcluding /
- * versionEndIncluding / versionEndExcluding
- */
-function version_is_in_range(string $version, array $cpeMatch): bool
-{
-    $startIncluding = $cpeMatch['versionStartIncluding'] ?? null;
-    $startExcluding = $cpeMatch['versionStartExcluding'] ?? null;
-    $endIncluding = $cpeMatch['versionEndIncluding'] ?? null;
-    $endExcluding = $cpeMatch['versionEndExcluding'] ?? null;
+function products_match(
+    string $detectedProduct,
+    string $cpeProduct
+): bool {
 
     if (
-        $startIncluding === null &&
-        $startExcluding === null &&
-        $endIncluding === null &&
-        $endExcluding === null
+        $detectedProduct === '' ||
+        $cpeProduct === ''
     ) {
-        return true;
-    }
-
-    if ($startIncluding !== null && version_compare_safe($version, $startIncluding) < 0) {
         return false;
     }
 
-    if ($startExcluding !== null && version_compare_safe($version, $startExcluding) <= 0) {
-        return false;
-    }
-
-    if ($endIncluding !== null && version_compare_safe($version, $endIncluding) > 0) {
-        return false;
-    }
-
-    if ($endExcluding !== null && version_compare_safe($version, $endExcluding) >= 0) {
-        return false;
-    }
-
-    return true;
+    return normalize_product_name($detectedProduct)
+        === normalize_product_name($cpeProduct);
 }
 
 
-/**
- * Normalise une version.
- */
+function cpe_identity_matches(
+    string $detectedProduct,
+    array $cpeData
+): bool {
+
+    // This scanner maps software/application CPEs.
+    if (($cpeData['part'] ?? '') !== 'a') {
+        return false;
+    }
+
+    $known = lookup_known_cpe($detectedProduct);
+
+    if ($known !== null) {
+
+        return (
+            strtolower($cpeData['vendor']) === strtolower($known['vendor']) &&
+            strtolower($cpeData['product']) === strtolower($known['product'])
+        );
+    }
+
+    return products_match(
+        normalize_product_name($detectedProduct),
+        normalize_product_name($cpeData['product'] ?? '')
+    );
+}
+
+
+/* =========================================================
+   6. VERSION MATCHING
+========================================================= */
+
 function normalize_version(string $version): string
 {
     $version = strtolower(trim($version));
-    $version = preg_replace('/^(version|ver|v)\s*/i', '', $version);
+
+    $version = preg_replace(
+        '/^(version|ver|v)\s*/i',
+        '',
+        $version
+    );
+
     return trim($version);
 }
 
 
-/**
- * Compare deux versions de manière sécurisée.
- */
-function version_compare_safe(string $versionA, string $versionB): int
-{
+function version_compare_safe(
+    string $versionA,
+    string $versionB
+): int {
+
     $a = normalize_version($versionA);
     $b = normalize_version($versionB);
 
@@ -496,17 +515,270 @@ function version_compare_safe(string $versionA, string $versionB): int
 }
 
 
+function version_matches_cpe(
+    string $detectedVersion,
+    string $cpeVersion,
+    array $cpeMatch
+): bool {
+
+    $detectedVersion = normalize_version(
+        $detectedVersion
+    );
+
+    $cpeVersion = trim($cpeVersion);
+
+    if (
+        $detectedVersion === '' ||
+        $cpeVersion === '-'
+    ) {
+        return false;
+    }
+
+    // Exact CPE version.
+    if ($cpeVersion !== '*') {
+
+        if (
+            version_compare_safe(
+                $detectedVersion,
+                $cpeVersion
+            ) !== 0
+        ) {
+            return false;
+        }
+    }
+
+    // Check NVD version boundaries as well.
+    return version_is_in_range(
+        $detectedVersion,
+        $cpeMatch
+    );
+}
+
+
+function version_is_in_range(
+    string $version,
+    array $cpeMatch
+): bool {
+
+    $startIncluding =
+        $cpeMatch['versionStartIncluding'] ?? null;
+
+    $startExcluding =
+        $cpeMatch['versionStartExcluding'] ?? null;
+
+    $endIncluding =
+        $cpeMatch['versionEndIncluding'] ?? null;
+
+    $endExcluding =
+        $cpeMatch['versionEndExcluding'] ?? null;
+
+    if (
+        $startIncluding === null &&
+        $startExcluding === null &&
+        $endIncluding === null &&
+        $endExcluding === null
+    ) {
+        return true;
+    }
+
+    if (
+        $startIncluding !== null &&
+        version_compare_safe($version, $startIncluding) < 0
+    ) {
+        return false;
+    }
+
+    if (
+        $startExcluding !== null &&
+        version_compare_safe($version, $startExcluding) <= 0
+    ) {
+        return false;
+    }
+
+    if (
+        $endIncluding !== null &&
+        version_compare_safe($version, $endIncluding) > 0
+    ) {
+        return false;
+    }
+
+    if (
+        $endExcluding !== null &&
+        version_compare_safe($version, $endExcluding) >= 0
+    ) {
+        return false;
+    }
+
+    return true;
+}
+
+
+/* =========================================================
+   7. NVD CONFIGURATION EVALUATION
+========================================================= */
+
 /**
- * Extrait le score CVSS.
+ * Evaluate a CPE node recursively.
+ *
+ * AND is evaluated conservatively:
+ * every condition must match the detected product.
+ *
+ * This avoids treating one matching CPE as sufficient
+ * when the NVD node requires additional conditions.
  */
+function evaluate_cpe_node(
+    array $node,
+    string $product,
+    string $version
+): bool {
+
+    $operator = strtoupper(
+        $node['operator'] ?? 'OR'
+    );
+
+    $conditions = [];
+
+    foreach ($node['cpeMatch'] ?? [] as $cpeMatch) {
+
+        $criteria = $cpeMatch['criteria'] ?? '';
+
+        if ($criteria === '') {
+            $conditions[] = false;
+            continue;
+        }
+
+        $cpeData = parse_cpe_23($criteria);
+
+        $matched = false;
+
+        if (
+            $cpeData !== null &&
+            ($cpeMatch['vulnerable'] ?? true) === true &&
+            cpe_identity_matches($product, $cpeData)
+        ) {
+
+            $matched = version_matches_cpe(
+                $version,
+                $cpeData['version'],
+                $cpeMatch
+            );
+        }
+
+        $conditions[] = $matched;
+    }
+
+    foreach ($node['children'] ?? [] as $child) {
+
+        $conditions[] = evaluate_cpe_node(
+            $child,
+            $product,
+            $version
+        );
+    }
+
+    if (empty($conditions)) {
+        return false;
+    }
+
+    if ($operator === 'AND') {
+
+        $result = !in_array(
+            false,
+            $conditions,
+            true
+        );
+
+    } else {
+
+        $result = in_array(
+            true,
+            $conditions,
+            true
+        );
+    }
+
+    if (!empty($node['negate'])) {
+        $result = !$result;
+    }
+
+    return $result;
+}
+
+
+/**
+ * Checks whether the detected product/version
+ * matches an NVD vulnerability configuration.
+ */
+function cve_matches_product_and_version(
+    array $cve,
+    string $product,
+    string $detectedVersion
+): array {
+
+    $configurations = $cve['configurations'] ?? [];
+
+    if (!is_array($configurations)) {
+        return [
+            'matched' => false,
+            'reason' => ''
+        ];
+    }
+
+    foreach ($configurations as $configuration) {
+
+        foreach ($configuration['nodes'] ?? [] as $node) {
+
+            if (
+                evaluate_cpe_node(
+                    $node,
+                    $product,
+                    $detectedVersion
+                )
+            ) {
+
+                return [
+                    'matched' => true,
+                    'reason' =>
+                        "CPE NVD compatible avec {$product} {$detectedVersion}"
+                ];
+            }
+        }
+    }
+
+    return [
+        'matched' => false,
+        'reason' => ''
+    ];
+}
+
+
+/* =========================================================
+   8. CVSS SCORE
+========================================================= */
+
 function extract_cvss_score(array $cve): ?float
 {
     $metrics = $cve['metrics'] ?? [];
 
-    foreach (['cvssMetricV31', 'cvssMetricV30', 'cvssMetricV40', 'cvssMetricV2'] as $metricVersion) {
-        if (!empty($metrics[$metricVersion]) && is_array($metrics[$metricVersion])) {
+    foreach (
+        [
+            'cvssMetricV40',
+            'cvssMetricV31',
+            'cvssMetricV30',
+            'cvssMetricV2'
+        ] as $metricVersion
+    ) {
+
+        if (
+            !empty($metrics[$metricVersion]) &&
+            is_array($metrics[$metricVersion])
+        ) {
+
             foreach ($metrics[$metricVersion] as $metric) {
-                if (isset($metric['cvssData']['baseScore'])) {
+
+                if (
+                    isset($metric['cvssData']['baseScore'])
+                ) {
                     return (float) $metric['cvssData']['baseScore'];
                 }
             }
@@ -517,39 +789,43 @@ function extract_cvss_score(array $cve): ?float
 }
 
 
-/**
- * Convertit un score CVSS en niveau de sévérité.
- */
 function score_to_severity(?float $score): string
 {
     if ($score === null) {
         return 'medium';
     }
+
     if ($score >= 9.0) {
         return 'critical';
     }
+
     if ($score >= 7.0) {
         return 'high';
     }
+
     if ($score >= 4.0) {
         return 'medium';
     }
+
     return 'low';
 }
 
 
-/**
- * Extrait la description anglaise d'une CVE.
- */
+/* =========================================================
+   9. CVE DESCRIPTION
+========================================================= */
+
 function extract_cve_description(array $cve): ?string
 {
     foreach ($cve['descriptions'] ?? [] as $description) {
+
         if (($description['lang'] ?? '') === 'en') {
             return $description['value'] ?? null;
         }
     }
 
     foreach ($cve['descriptions'] ?? [] as $description) {
+
         if (!empty($description['value'])) {
             return $description['value'];
         }
@@ -559,14 +835,18 @@ function extract_cve_description(array $cve): ?string
 }
 
 
-/**
- * Délai entre deux requêtes NVD.
- * Sans API key: ~6.5s. Avec API key: ~0.6s.
- */
+/* =========================================================
+   10. NVD REQUEST THROTTLING
+========================================================= */
+
 function cve_throttle_delay_microseconds(): int
 {
-    if (defined('NVD_API_KEY') && NVD_API_KEY !== '') {
+    if (
+        defined('NVD_API_KEY') &&
+        NVD_API_KEY !== ''
+    ) {
         return 600000;
     }
+
     return 6500000;
 }
